@@ -279,6 +279,8 @@ pub struct AppView {
     pub previews: HashMap<String, Loadable<crate::collect::fsbrowse::Preview>>,
     pub preview_tab: Option<PreviewTab>,
     pub modules: HashMap<u32, Loadable<Vec<crate::collect::fsbrowse::ModuleInfo>>>,
+    /// 使用软件渲染时为渲染器名称（此时关闭界面动画）
+    pub software_render: Option<String>,
 }
 
 #[derive(Default)]
@@ -326,6 +328,11 @@ impl AppView {
             .and_then(|i| args.get(i + 1))
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
+        let software_render = detect_software_render(window);
+        set_reduced_motion(software_render.is_some());
+        if let Some(name) = &software_render {
+            log::info!("使用软件渲染（{name}），已关闭界面动画");
+        }
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle);
         let note_input = cx.new(|cx| TextInput::new("添加备注（随报告导出）", cx).with_icon("pencil"));
@@ -382,6 +389,7 @@ impl AppView {
             previews: HashMap::new(),
             preview_tab: None,
             modules: HashMap::new(),
+            software_render,
         };
         match tab.as_str() {
             "dns" => this.f_net = NetFilter::Dns,
@@ -637,6 +645,27 @@ impl AppView {
                         .text_size(px(12.))
                         .child(spinner("tb-spin", 13., t.primary))
                         .child(format!("正在采集 {done}/{}", self.stages.len())),
+                )
+            })
+            .when_some(self.software_render.clone(), |d, name| {
+                d.child(
+                    div()
+                        .id("software-render")
+                        .mr_3()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_3()
+                        .h(px(26.))
+                        .rounded(px(13.))
+                        .bg(t.gray_soft)
+                        .text_color(t.text_muted)
+                        .text_size(px(12.))
+                        .child(icon("monitor", 13., t.text_muted))
+                        .child("软件渲染")
+                        .tooltip(tooltip(format!(
+                            "未检测到可用的显卡加速，当前由 CPU 绘制界面（{name}）。\n已自动关闭界面动画以降低 CPU 占用，功能不受影响。"
+                        ))),
                 )
             })
             .child(if self.is_admin {
@@ -1050,6 +1079,17 @@ impl AppView {
     fn on_focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_search(window, cx);
     }
+}
+
+/// 判断窗口是否运行在软件渲染器上（如没有显卡驱动时的 Microsoft Basic Render Driver）。
+/// 环境变量 LWI_SOFTWARE_RENDER=1 可强制按软件渲染处理，便于测试。
+fn detect_software_render(window: &Window) -> Option<String> {
+    if std::env::var_os("LWI_SOFTWARE_RENDER").is_some() {
+        return Some("LWI_SOFTWARE_RENDER".into());
+    }
+    let specs = window.gpu_specs()?;
+    let basic = specs.device_name.contains("Basic Render") || specs.driver_name.contains("0x1414");
+    (specs.is_software_emulated || basic).then_some(specs.device_name)
 }
 
 fn fresh_stages() -> Vec<StageLog> {

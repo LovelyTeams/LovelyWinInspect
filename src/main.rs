@@ -4,6 +4,7 @@ mod actions;
 mod analysis;
 mod assets;
 mod collect;
+mod fallback;
 mod model;
 mod report;
 mod settings;
@@ -13,25 +14,13 @@ mod update;
 
 use gpui::{App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
-use model::{ScanReport, Stage};
 
 /// 无界面模式：`LovelyWinInspect.exe --json out.json [--days N] [--export [--evtx]]`，便于批量/脚本化采集。
 fn headless(args: &[String]) -> bool {
     let Some(pos) = args.iter().position(|a| a == "--json") else { return false };
     let out = args.get(pos + 1).cloned().unwrap_or_else(|| "lovelywininspect.json".into());
-    let days = args
-        .iter()
-        .position(|a| a == "--days")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|d| d.parse().ok())
-        .unwrap_or(30);
-    let mut report = ScanReport { lookback_days: days, started: Some(chrono::Local::now()), ..Default::default() };
-    for stage in Stage::ALL {
-        let t = std::time::Instant::now();
-        let s = collect::run_stage(stage, &mut report);
-        println!("[{}] {} ({} ms)", stage.label(), s, t.elapsed().as_millis());
-    }
-    report.finished = Some(chrono::Local::now());
+    let days = days_arg(args).unwrap_or(30);
+    let report = fallback::collect_all(days, |stage, summary, ms| println!("[{}] {} ({} ms)", stage.label(), summary, ms));
     if args.iter().any(|a| a == "--export") {
         let opts = report::ExportOptions { evtx: args.iter().any(|a| a == "--evtx"), ..Default::default() };
         match report::export(&report, opts, None) {
@@ -45,6 +34,11 @@ fn headless(args: &[String]) -> bool {
         Err(e) => eprintln!("序列化失败: {e}"),
     }
     true
+}
+
+/// `--days N` 参数。
+fn days_arg(args: &[String]) -> Option<u32> {
+    args.iter().position(|a| a == "--days").and_then(|i| args.get(i + 1)).and_then(|d| d.parse().ok()).filter(|&d| d > 0)
 }
 
 /// 设置环境变量 LWI_LOG=1 时把 GPUI 与本程序的日志输出到 stderr，便于排查。
@@ -115,11 +109,14 @@ const USAGE: &str = "LovelyWinInspect —— Windows 安全基线核查与应急
                      persistence | account | eventlog | file | registry | files |
                      export | settings
   --open <路径>      打开文件管理并定位到指定文件或目录（选中文件时显示预览）
+  --report           无界面采集，导出报告后在浏览器中打开 HTML 报告
+                     （无法使用图形界面的机器可用；配合 --days 指定回溯天数）
   --json <文件>      无界面模式：完成采集后把结果写入 JSON 文件
   --days <N>         日志与文件痕迹的回溯天数（默认 30）
   --export           无界面模式下同时导出完整证据包
   --evtx             配合 --export，额外导出原始 .evtx 日志
   --check-update     查询 GitHub Releases 上的最新版本后退出（加 --pre 包含预发布）
+  --gpu-info         列出图形适配器并检查图形界面能否启动
   -V, --version      显示版本号
   -h, --help         显示本帮助
 
@@ -158,11 +155,25 @@ fn main() {
         }
         return;
     }
+    if args.iter().any(|a| a == "--gpu-info") {
+        fallback::print_gpu_info();
+        return;
+    }
+    let lookback = days_arg(&args).unwrap_or_else(|| settings::Settings::load().lookback_days.max(1));
+    if args.iter().any(|a| a == "--report") {
+        let ok = fallback::run_report(None, lookback);
+        std::process::exit(if ok { 0 } else { 1 });
+    }
     if headless(&args) {
         return;
     }
+    // GPUI 在 Direct3D 11 不可用时会弹英文错误并崩溃，先自行探测，失败则提供无界面采集
+    if let Err(reason) = fallback::probe_d3d11() {
+        fallback::run_report(Some(&reason), lookback);
+        return;
+    }
 
-    Application::new().with_assets(assets::Assets).run(|cx: &mut App| {
+    Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
         cx.set_global(theme::Theme::light());
         ui::input::bind_keys(cx);
         ui::app::bind_keys(cx);
@@ -180,7 +191,9 @@ fn main() {
             },
             |window, cx| cx.new(|cx| ui::app::AppView::new(window, cx)),
         );
-        if opened.is_err() {
+        if let Err(e) = opened {
+            // 例如 DirectComposition 不可用：不再静默退出，改为提供无界面采集
+            fallback::run_report(Some(&format!("窗口创建失败（{e}）")), lookback);
             cx.quit();
             return;
         }

@@ -1,5 +1,6 @@
 //! 通用 UI 组件：卡片、徽标、表格行、筛选标签、按钮、提示框等。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use gpui::{
@@ -16,12 +17,25 @@ pub fn icon(name: &str, size: f32, color: Hsla) -> Svg {
     svg().path(icon_path(name)).size(px(size)).flex_none().text_color(color)
 }
 
-pub fn spinner(id: impl Into<ElementId>, size: f32, color: Hsla) -> impl IntoElement {
-    icon("loader", size, color).with_animation(
-        id,
-        Animation::new(Duration::from_millis(900)).repeat(),
-        |s, delta| s.with_transformation(Transformation::rotate(percentage(delta))),
-    )
+static REDUCED_MOTION: AtomicBool = AtomicBool::new(false);
+
+/// 关闭持续动画。软件渲染（无可用显卡）时每帧都由 CPU 绘制，旋转动画会让采集期间 CPU 占用
+/// 增加十几倍，因此检测到软件渲染时启用。
+pub fn set_reduced_motion(on: bool) {
+    REDUCED_MOTION.store(on, Ordering::Relaxed);
+}
+
+pub fn spinner(id: impl Into<ElementId>, size: f32, color: Hsla) -> AnyElement {
+    if REDUCED_MOTION.load(Ordering::Relaxed) {
+        return icon("loader", size, color).into_any_element();
+    }
+    icon("loader", size, color)
+        .with_animation(
+            id,
+            Animation::new(Duration::from_millis(900)).repeat(),
+            |s, delta| s.with_transformation(Transformation::rotate(percentage(delta))),
+        )
+        .into_any_element()
 }
 
 pub fn card(t: &Theme) -> Div {

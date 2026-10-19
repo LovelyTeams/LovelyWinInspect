@@ -99,11 +99,13 @@ LovelyWinInspect.exe [选项]
   --tab <名称>       配合 --page 预选页内视图：dns | arp（网络）、rootcert（启动项）、ads（文件）、
                      tree（进程树）
   --open <路径>      打开文件管理并定位到指定文件或目录（选中文件时显示预览）
+  --report           无界面采集，导出报告后在浏览器中打开 HTML 报告
   --json <文件>      无界面模式：完成采集后把结果写入 JSON 文件
   --days <N>         日志与文件痕迹的回溯天数（默认 30）
   --export           无界面模式下同时导出完整证据包
   --evtx             配合 --export，额外导出原始 .evtx 日志
   --check-update     查询 GitHub Releases 上的最新版本后退出（加 --pre 包含预发布）
+  --gpu-info         列出图形适配器并检查图形界面能否启动
   -V, --version      显示版本号
   -h, --help         显示帮助
 ```
@@ -287,6 +289,8 @@ tools/                 # 辅助脚本
 <summary><b>支持哪些系统？</b></summary>
 
 面向 Windows 10 / 11 开发和测试。界面基于 GPUI，需要 Windows 10 1703 或 Windows Server 2019 及以上，服务器专属检查项会自动启用；Windows Server 2016 尚未验证。
+
+没有独立显卡或显卡驱动的机器（虚拟机、物理服务器、远程桌面）会自动使用系统自带的软件渲染器（Microsoft Basic Render Driver），标题栏显示“软件渲染”，并自动关闭界面动画以降低 CPU 占用。如果连软件渲染也不可用，程序会提示改为无界面采集，完成后在浏览器中打开 HTML 报告；也可以直接用 `--report` 走这条路径，用 `--gpu-info` 查看本机的图形适配器情况。
 
 Windows Server 2008 / 2008 R2 / 2012 等旧系统目前无法启动。后续计划提供只含命令行采集的精简版，在旧系统上导出 JSON，再导入到新系统的界面中分析。详见[旧版 Windows 兼容性与离线分析规划](docs/legacy-os-and-json-import.md)。
 
