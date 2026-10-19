@@ -1,26 +1,45 @@
 //! 主视图：自绘标题栏 + mini 侧边栏 + 页面区 + 详情抽屉；负责调度采集与导出任务。
 
-use std::ops::Range;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Local;
 use gpui::{
-    AnyElement, ClipboardItem, Context, FontWeight, IntoElement, ParentElement, Render, Stateful, Styled, Task,
-    Window, WindowControlArea, div, prelude::*, px, uniform_list,
+    AnyElement, App, ClipboardItem, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyBinding, ParentElement, Render,
+    Styled, Subscription, Task, UniformListScrollHandle, Window, WindowControlArea, actions, div, prelude::*, px,
 };
 
 use super::components::*;
+use super::input::{InputEvent, TextInput};
+use super::extras::{Loadable, PreviewTab};
+use super::fileman::FsState;
+use super::listkit::{ListId, mark_color};
 use crate::collect;
 use crate::model::*;
 use crate::report::{self, ExportOptions};
-use super::menu::{Confirm, ContextMenu};
+use super::menu::{Confirm, ContextMenu, MenuItem};
 use crate::settings::{Settings, ThemeMode};
 use crate::update::{self, ReleaseInfo};
 use crate::theme::{Theme, theme};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+actions!(lwi, [CloseDetail, SelectPrev, SelectNext, CopySelected, FocusSearch]);
+
+const CONTEXT: &str = "AppView";
+
+/// 主界面快捷键：Esc 关闭详情，上下键切换记录，Ctrl+C 复制当前详情，Ctrl+F 搜索。
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("escape", CloseDetail, Some(CONTEXT)),
+        KeyBinding::new("up", SelectPrev, Some(CONTEXT)),
+        KeyBinding::new("down", SelectNext, Some(CONTEXT)),
+        KeyBinding::new("ctrl-c", CopySelected, Some(CONTEXT)),
+        KeyBinding::new("ctrl-f", FocusSearch, Some(CONTEXT)),
+    ]);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Page {
     Overview,
     Baseline,
@@ -32,6 +51,7 @@ pub enum Page {
     EventLog,
     File,
     Registry,
+    FileManager,
     Export,
     Settings,
 }
@@ -47,6 +67,7 @@ pub const NAV: &[(Page, &str, &str, &str)] = &[
     (Page::EventLog, "list", "日志", "系统日志分析"),
     (Page::File, "folder", "文件", "文件痕迹排查"),
     (Page::Registry, "database", "注册表", "注册表取证：执行痕迹、用户活动与网络历史"),
+    (Page::FileManager, "hard-drive", "文件管理", "文件管理：浏览、搜索、预览与隔离可疑文件"),
     (Page::Export, "download", "导出", "证据与报告导出"),
 ];
 
@@ -56,6 +77,23 @@ pub struct Detail {
     pub subtitle: String,
     pub severity: Option<Severity>,
     pub fields: Vec<(String, String)>,
+    /// 抽屉底部的处置按钮（与右键菜单一致）
+    pub actions: Vec<MenuItem>,
+    /// 可标记时为 (标记键, 模块, 对象名)
+    pub mark: Option<(String, String, String)>,
+    /// 需要按需加载的附加内容
+    pub extra: DetailExtra,
+}
+
+/// 详情抽屉中按需加载的附加内容。
+#[derive(Clone, Default, PartialEq)]
+pub enum DetailExtra {
+    #[default]
+    None,
+    /// 进程加载的模块
+    Modules(u32),
+    /// 文件内容预览
+    Preview(String),
 }
 
 impl Page {
@@ -72,6 +110,7 @@ impl Page {
             "eventlog" => Page::EventLog,
             "file" => Page::File,
             "registry" => Page::Registry,
+            "files" | "filemanager" => Page::FileManager,
             "export" => Page::Export,
             "settings" => Page::Settings,
             _ => return None,
@@ -81,7 +120,7 @@ impl Page {
 
 impl Detail {
     pub fn new(title: impl Into<String>, subtitle: impl Into<String>, severity: Option<Severity>) -> Self {
-        Self { title: title.into(), subtitle: subtitle.into(), severity, fields: Vec::new() }
+        Self { title: title.into(), subtitle: subtitle.into(), severity, ..Default::default() }
     }
 
     pub fn field(mut self, k: &str, v: impl Into<String>) -> Self {
@@ -92,7 +131,22 @@ impl Detail {
         self
     }
 
-    fn to_text(&self) -> String {
+    pub fn actions(mut self, items: Vec<MenuItem>) -> Self {
+        self.actions = items;
+        self
+    }
+
+    pub fn markable(mut self, key: String, category: &str) -> Self {
+        self.mark = Some((key, category.to_string(), self.title.clone()));
+        self
+    }
+
+    pub fn extra(mut self, extra: DetailExtra) -> Self {
+        self.extra = extra;
+        self
+    }
+
+    pub fn to_text(&self) -> String {
         let mut s = format!("{}\n{}\n", self.title, self.subtitle);
         if let Some(sev) = self.severity {
             s.push_str(&format!("风险等级: {}\n", sev.label()));
@@ -200,6 +254,31 @@ pub struct AppView {
     pub settings: Settings,
     pub update: UpdateState,
     _appearance_sub: Option<gpui::Subscription>,
+
+    pub focus_handle: FocusHandle,
+    pub subscriptions: Vec<Subscription>,
+    /// 各页面的搜索框
+    pub searches: HashMap<Page, Entity<TextInput>>,
+    /// 各列表的排序列与方向（true = 降序）
+    pub sorts: HashMap<ListId, (usize, bool)>,
+    pub scrolls: HashMap<ListId, UniformListScrollHandle>,
+    /// 当前页面正在显示的列表及其行（供方向键切换）
+    pub nav: Option<(ListId, Rc<Vec<usize>>)>,
+    pub selected: Option<(ListId, usize)>,
+    /// 研判标记，键见各列表的 mark_key
+    pub marks: BTreeMap<String, Mark>,
+    pub note_input: Entity<TextInput>,
+
+    pub proc_tree: bool,
+    pub proc_collapsed: HashSet<u32>,
+    /// 进程树渲染缓存：进程下标 -> (深度, 是否有子节点)
+    pub proc_depth: HashMap<usize, (u16, bool)>,
+    /// 本工具添加过防火墙封禁规则的 IP
+    pub blocked_ips: HashSet<String>,
+    pub fs: FsState,
+    pub previews: HashMap<String, Loadable<crate::collect::fsbrowse::Preview>>,
+    pub preview_tab: Option<PreviewTab>,
+    pub modules: HashMap<u32, Loadable<Vec<crate::collect::fsbrowse::ModuleInfo>>>,
 }
 
 #[derive(Default)]
@@ -247,6 +326,15 @@ impl AppView {
             .and_then(|i| args.get(i + 1))
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
+        let focus_handle = cx.focus_handle();
+        window.focus(&focus_handle);
+        let note_input = cx.new(|cx| TextInput::new("添加备注（随报告导出）", cx).with_icon("pencil"));
+        let note_sub = cx.subscribe(&note_input, |this, input, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::Changed) {
+                let note = input.read(cx).text().to_string();
+                this.set_mark_note(note, cx);
+            }
+        });
         let mut this = Self {
             page,
             report: Arc::new(ScanReport::default()),
@@ -277,6 +365,23 @@ impl AppView {
             settings,
             update: UpdateState::default(),
             _appearance_sub: Some(appearance_sub),
+            focus_handle,
+            subscriptions: vec![note_sub],
+            searches: HashMap::new(),
+            sorts: HashMap::new(),
+            scrolls: HashMap::new(),
+            nav: None,
+            selected: None,
+            marks: BTreeMap::new(),
+            note_input,
+            proc_tree: false,
+            proc_collapsed: HashSet::new(),
+            proc_depth: HashMap::new(),
+            blocked_ips: crate::actions::blocked_ips(),
+            fs: FsState::default(),
+            previews: HashMap::new(),
+            preview_tab: None,
+            modules: HashMap::new(),
         };
         match tab.as_str() {
             "dns" => this.f_net = NetFilter::Dns,
@@ -286,7 +391,15 @@ impl AppView {
                 this.f_persist_all = true;
             }
             "ads" => this.f_file_kind = Some(ArtifactKind::AltStream),
+            "tree" => {
+                this.proc_tree = true;
+                this.f_proc_suspicious = false;
+            }
             _ => {}
+        }
+        // `--open <路径>`：在文件管理中定位文件或目录
+        if let Some(path) = args.iter().position(|a| a == "--open").and_then(|i| args.get(i + 1)) {
+            this.browse_to_file(path, cx);
         }
         if this.settings.auto_scan {
             this.start_scan(cx);
@@ -352,6 +465,12 @@ impl AppView {
         }
         self.scanning = true;
         self.stages = fresh_stages();
+        // 重新排查后下标会变化，关闭详情避免指向错误的记录（研判标记按稳定键保留）。
+        // 文件管理的条目不来自排查报告，不受影响。
+        if !matches!(self.selected, Some((ListId::Fs | ListId::Quarantine, _))) {
+            self.detail = None;
+            self.selected = None;
+        }
         let lookback = self.lookback;
         cx.notify();
         self.scan_task = Some(cx.spawn(async move |this, cx| {
@@ -405,7 +524,8 @@ impl AppView {
         self.export.running = true;
         self.export.error = None;
         self.export.result = None;
-        let report = self.report.clone();
+        let mut report = (*self.report).clone();
+        report.marks = self.marks.values().cloned().collect();
         let opts = self.export.opts;
         let root = self.settings.export_root();
         cx.notify();
@@ -426,53 +546,28 @@ impl AppView {
     }
 
     pub fn show(&mut self, d: Detail, cx: &mut Context<Self>) {
+        let note = d.mark.as_ref().and_then(|(k, _, _)| self.marks.get(k)).map(|m| m.note.clone()).unwrap_or_default();
+        self.note_input.update(cx, |input, cx| input.set_text(note, cx));
         self.detail = Some(d);
+        self.on_detail_opened(cx);
+        cx.notify();
+    }
+
+    pub fn close_detail(&mut self, cx: &mut Context<Self>) {
+        self.detail = None;
+        self.selected = None;
         cx.notify();
     }
 
     pub fn go(&mut self, page: Page, cx: &mut Context<Self>) {
+        // 抽屉没有遮罩，切换页面时侧边栏可点，需随之关闭上一页的详情
+        if page != self.page {
+            self.detail = None;
+            self.selected = None;
+            self.nav = None;
+        }
         self.page = page;
         cx.notify();
-    }
-
-    /// 带表头的虚拟滚动表格（大数据量页面使用）。
-    pub fn virtual_table<F>(
-        &self,
-        t: &Theme,
-        id: &'static str,
-        cols: &'static [Col],
-        rows: Rc<Vec<usize>>,
-        empty_text: &str,
-        cx: &mut Context<Self>,
-        row: F,
-    ) -> gpui::Div
-    where
-        F: Fn(&mut AppView, usize, usize, &Theme, &mut Context<AppView>) -> Stateful<gpui::Div> + 'static,
-    {
-        let n = rows.len();
-        let body: AnyElement = if n == 0 {
-            empty_state(t, "check-circle", empty_text.to_string()).into_any_element()
-        } else {
-            uniform_list(
-                id,
-                n,
-                cx.processor(move |this, range: Range<usize>, _window, cx| {
-                    let t = theme(cx);
-                    range.map(|ix| row(this, rows[ix], ix, &t, cx)).collect::<Vec<_>>()
-                }),
-            )
-            .flex_1()
-            .min_h(px(0.))
-            .into_any_element()
-        };
-        card(t)
-            .flex_1()
-            .min_h(px(0.))
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .child(table_header(t, cols))
-            .child(body)
     }
 
     // ---------------------------------------------------------------- 标题栏
@@ -732,128 +827,228 @@ impl AppView {
 
     // ---------------------------------------------------------------- 详情抽屉
 
+    /// 浮在内容区右侧（标题栏以下），不加遮罩：左侧列表仍可滚动和点选，点其他行直接切换详情。
     fn render_drawer(&mut self, d: Detail, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let text = d.to_text();
+        let extra = self.render_detail_extra(&d.extra, cx);
+        let mark_bar = d.mark.is_some().then(|| self.render_mark_bar(&t, cx));
+        let actions: Vec<_> = d
+            .actions
+            .iter()
+            .enumerate()
+            .map(|(i, it)| {
+                let act = it.act.clone();
+                let danger = act.is_danger();
+                let fg = if danger { t.red } else { t.text };
+                let hover = if danger { t.red_soft } else { t.card_hover };
+                div()
+                    .id(("detail-act", i))
+                    .flex_none()
+                    .h(px(28.))
+                    .px(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(if danger { t.red.opacity(0.4) } else { t.border })
+                    .bg(t.card)
+                    .text_color(fg)
+                    .text_size(px(12.5))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .child(icon(it.icon, 14., if danger { t.red } else { t.text_muted }))
+                    .child(it.label.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| this.on_menu_click(act.clone(), cx)))
+            })
+            .collect();
         div()
+            .id("drawer")
+            .occlude()
             .absolute()
             .top_0()
-            .left_0()
-            .size_full()
+            .right_0()
+            .h_full()
+            .w(px(560.))
+            .bg(t.card)
+            .border_l_1()
+            .border_color(t.border)
+            .shadow_lg()
+            .flex()
+            .flex_col()
             .child(
                 div()
-                    .id("backdrop")
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .bg(t.overlay)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.detail = None;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                div()
-                    .id("drawer")
-                    .occlude()
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .h_full()
-                    .w(px(540.))
-                    .bg(t.card)
-                    .border_l_1()
-                    .border_color(t.border)
-                    .shadow_lg()
+                    .flex_none()
                     .flex()
-                    .flex_col()
+                    .items_start()
+                    .gap_3()
+                    .px_5()
+                    .py_4()
+                    .border_b_1()
+                    .border_color(t.divider)
                     .child(
                         div()
-                            .flex_none()
+                            .flex_1()
+                            .min_w_0()
                             .flex()
-                            .items_start()
-                            .gap_3()
-                            .px_5()
-                            .py_4()
-                            .border_b_1()
-                            .border_color(t.divider)
+                            .flex_col()
+                            .gap_1()
                             .child(
                                 div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .when_some(d.severity, |el, s| el.child(sev_badge(&t, s)))
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .text_size(px(16.))
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .child(d.title.clone()),
-                                            ),
-                                    )
-                                    .child(div().text_size(px(12.)).text_color(t.text_muted).child(d.subtitle.clone())),
-                            )
-                            .child(
-                                div()
-                                    .id("drawer-close")
-                                    .size(px(30.))
-                                    .rounded(px(6.))
                                     .flex()
                                     .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .hover(move |s| s.bg(t.card_hover))
-                                    .child(icon("x", 16., t.text_muted))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.detail = None;
-                                        cx.notify();
-                                    })),
-                            ),
+                                    .gap_2()
+                                    .when_some(d.severity, |el, s| el.child(sev_badge(&t, s)))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_size(px(16.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(d.title.clone()),
+                                    ),
+                            )
+                            .child(div().text_size(px(12.)).text_color(t.text_muted).child(d.subtitle.clone())),
                     )
                     .child(
                         div()
-                            .id("drawer-body")
-                            .flex_1()
-                            .min_h(px(0.))
-                            .overflow_y_scroll()
-                            .px_5()
-                            .py_3()
-                            .children(d.fields.iter().map(|(k, v)| {
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .py(px(8.))
-                                    .border_b_1()
-                                    .border_color(t.divider)
-                                    .child(div().text_size(px(12.)).text_color(t.text_faint).child(k.clone()))
-                                    .child(div().text_size(px(13.)).text_color(t.text).child(v.clone()))
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
+                            .id("drawer-close")
+                            .size(px(30.))
+                            .rounded(px(6.))
                             .flex()
-                            .justify_end()
-                            .gap_2()
-                            .px_5()
-                            .py_3()
-                            .border_t_1()
-                            .border_color(t.divider)
-                            .child(small_button(&t, "copy-detail", "copy", "复制全部信息").on_click(cx.listener(
-                                move |_, _, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())),
-                            ))),
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(t.card_hover))
+                            .tooltip(tooltip("关闭 (Esc)"))
+                            .child(icon("x", 16., t.text_muted))
+                            .on_click(cx.listener(|this, _, _, cx| this.close_detail(cx))),
                     ),
             )
+            .children(mark_bar)
+            .child(
+                div()
+                    .id("drawer-body")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .px_5()
+                    .py_3()
+                    .children(d.fields.iter().map(|(k, v)| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .py(px(8.))
+                            .border_b_1()
+                            .border_color(t.divider)
+                            .child(div().text_size(px(12.)).text_color(t.text_faint).child(k.clone()))
+                            .child(div().text_size(px(13.)).text_color(t.text).child(v.clone()))
+                    }))
+                    .children(extra),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_wrap()
+                    .justify_end()
+                    .gap_2()
+                    .px_5()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(t.divider)
+                    .children(actions)
+                    .child(small_button(&t, "copy-detail", "copy", "复制全部信息").on_click(cx.listener(
+                        move |_, _, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())),
+                    ))),
+            )
+    }
+
+    /// 研判标签 + 备注输入。
+    fn render_mark_bar(&mut self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let current = self.current_mark().and_then(|m| m.tag);
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_5()
+            .py_3()
+            .border_b_1()
+            .border_color(t.divider)
+            .bg(t.header_bg)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(icon("tag", 14., t.text_faint))
+                    .child(div().text_size(px(12.)).text_color(t.text_muted).child("研判"))
+                    .children(MarkTag::ALL.into_iter().enumerate().map(|(i, tag)| {
+                        let on = current == Some(tag);
+                        let color = mark_color(t, Some(tag));
+                        let hover = t.card_hover;
+                        div()
+                            .id(("mark-tag", i))
+                            .flex_none()
+                            .h(px(26.))
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .rounded(px(13.))
+                            .border_1()
+                            .border_color(if on { color } else { t.border })
+                            .bg(if on { color.opacity(0.14) } else { t.card })
+                            .text_color(if on { color } else { t.text_muted })
+                            .text_size(px(12.))
+                            .cursor_pointer()
+                            .when(!on, move |d| d.hover(move |s| s.bg(hover)))
+                            .child(dot(color, 7.))
+                            .child(tag.label())
+                            .on_click(cx.listener(move |this, _, _, cx| this.set_mark_tag(tag, cx)))
+                    })),
+            )
+            .child(self.note_input.clone())
+            .into_any_element()
+    }
+
+    fn render_detail_extra(&mut self, extra: &DetailExtra, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        match extra {
+            DetailExtra::None => None,
+            DetailExtra::Modules(pid) => Some(self.render_modules(*pid, cx)),
+            DetailExtra::Preview(path) => Some(self.render_preview(path.clone(), cx)),
+        }
+    }
+
+    fn on_close_detail(&mut self, _: &CloseDetail, _: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm.take().is_some() || self.menu.take().is_some() {
+            cx.notify();
+        } else if self.detail.is_some() {
+            self.close_detail(cx);
+        }
+    }
+
+    fn on_select_prev(&mut self, _: &SelectPrev, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_selection(-1, cx);
+    }
+
+    fn on_select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_selection(1, cx);
+    }
+
+    fn on_copy_selected(&mut self, _: &CopySelected, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(d) = &self.detail {
+            let msg = format!("已复制 {}", d.title);
+            cx.write_to_clipboard(ClipboardItem::new_string(d.to_text()));
+            self.toast(msg, true, cx);
+        }
+    }
+
+    fn on_focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_search(window, cx);
     }
 }
 
@@ -894,6 +1089,7 @@ impl Render for AppView {
             Page::EventLog => self.render_events(cx).into_any_element(),
             Page::File => self.render_files(cx).into_any_element(),
             Page::Registry => self.render_registry(cx).into_any_element(),
+            Page::FileManager => self.render_file_manager(cx).into_any_element(),
             Page::Export => self.render_export(cx).into_any_element(),
             Page::Settings => self.render_settings(cx).into_any_element(),
         };
@@ -904,6 +1100,13 @@ impl Render for AppView {
         div()
             .relative()
             .size_full()
+            .track_focus(&self.focus_handle)
+            .key_context(CONTEXT)
+            .on_action(cx.listener(Self::on_close_detail))
+            .on_action(cx.listener(Self::on_select_prev))
+            .on_action(cx.listener(Self::on_select_next))
+            .on_action(cx.listener(Self::on_copy_selected))
+            .on_action(cx.listener(Self::on_focus_search))
             .flex()
             .flex_col()
             .bg(t.bg)
@@ -912,13 +1115,14 @@ impl Render for AppView {
             .child(self.render_titlebar(window, cx))
             .child(
                 div()
+                    .relative()
                     .flex()
                     .flex_1()
                     .min_h(px(0.))
                     .child(self.render_sidebar(cx))
-                    .child(div().flex_1().min_w(px(0.)).h_full().child(page)),
+                    .child(div().flex_1().min_w(px(0.)).h_full().child(page))
+                    .children(drawer),
             )
-            .children(drawer)
             .children(menu)
             .children(confirm)
             .children(toast)

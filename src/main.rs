@@ -112,7 +112,9 @@ const USAGE: &str = "LovelyWinInspect —— Windows 安全基线核查与应急
 用法: LovelyWinInspect.exe [选项]
 
   --page <名称>      指定启动页：overview | baseline | timeline | process | network |
-                     persistence | account | eventlog | file | export | settings
+                     persistence | account | eventlog | file | registry | files |
+                     export | settings
+  --open <路径>      打开文件管理并定位到指定文件或目录（选中文件时显示预览）
   --json <文件>      无界面模式：完成采集后把结果写入 JSON 文件
   --days <N>         日志与文件痕迹的回溯天数（默认 30）
   --export           无界面模式下同时导出完整证据包
@@ -162,6 +164,8 @@ fn main() {
 
     Application::new().with_assets(assets::Assets).run(|cx: &mut App| {
         cx.set_global(theme::Theme::light());
+        ui::input::bind_keys(cx);
+        ui::app::bind_keys(cx);
         let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
         let opened = cx.open_window(
             WindowOptions {

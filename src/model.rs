@@ -648,6 +648,44 @@ pub struct ScanReport {
     pub timeline: Vec<TimelineEvent>,
     pub stages: Vec<StageLog>,
     pub errors: Vec<String>,
+    /// 分析人员在界面中对记录做的研判标记与备注（导出时写入）
+    #[serde(default)]
+    pub marks: Vec<Mark>,
+}
+
+/// 研判标签。
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum MarkTag {
+    Malicious,
+    Suspicious,
+    FalsePositive,
+    Handled,
+}
+
+impl MarkTag {
+    pub const ALL: [MarkTag; 4] = [MarkTag::Malicious, MarkTag::Suspicious, MarkTag::FalsePositive, MarkTag::Handled];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MarkTag::Malicious => "确认恶意",
+            MarkTag::Suspicious => "可疑待查",
+            MarkTag::FalsePositive => "误报",
+            MarkTag::Handled => "已处理",
+        }
+    }
+}
+
+/// 一条研判标记。`key` 由记录的稳定字段生成，重新排查后仍能对应到同一对象。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Mark {
+    pub key: String,
+    /// 所在模块，如“进程”“启动项”
+    pub category: String,
+    /// 对象名称（标记时的标题）
+    pub object: String,
+    pub tag: Option<MarkTag>,
+    pub note: String,
+    pub time: Time,
 }
 
 impl ScanReport {

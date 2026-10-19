@@ -5,9 +5,10 @@ use std::rc::Rc;
 
 use gpui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px};
 
-use super::app::{AppView, Detail};
+use super::app::{AppView, Detail, Page};
 use super::components::*;
-use super::overview::{FINDING_COLS, finding_cells, finding_detail};
+use super::listkit::{ListId, SortVal, refine};
+use super::overview::{FINDING_COLS, finding_cells};
 use crate::analysis::tactic_summary;
 use crate::model::*;
 use crate::theme::theme;
@@ -35,7 +36,7 @@ const TL_COLS: &[Col] = &[
     col("风险", 60.),
 ];
 
-fn timeline_detail(e: &TimelineEvent) -> Detail {
+pub fn timeline_detail(e: &TimelineEvent) -> Detail {
     Detail::new(e.title.clone(), e.source.clone(), Some(e.severity))
         .field("时间", e.time.format("%Y-%m-%d %H:%M:%S").to_string())
         .field("来源", e.source.clone())
@@ -162,22 +163,46 @@ impl AppView {
         // ---------------- 视图切换 + 筛选
         let tac = self.f_tactic;
         let min = self.f_tl_min;
-        let tl_rows: Rc<Vec<usize>> = Rc::new(
+        let query = self.query(Page::Timeline, cx);
+        let tl_rows: Rc<Vec<usize>> = Rc::new(refine(
             r.timeline
                 .iter()
                 .enumerate()
                 .filter(|(_, e)| e.severity >= min && tac.map(|x| e.tactic == Some(x)).unwrap_or(true))
                 .map(|(i, _)| i)
                 .collect(),
-        );
-        let f_rows: Rc<Vec<usize>> = Rc::new(
+            &r.timeline,
+            &query,
+            self.sort_of(ListId::Timeline),
+            |e| format!("{} {} {} {}", e.source, e.title, e.detail, e.tactic.map(|t| t.label()).unwrap_or("")),
+            |e, c| match c {
+                0 => SortVal::N(e.time.timestamp()),
+                1 => SortVal::s(&e.source),
+                2 => SortVal::s(&e.title),
+                3 => SortVal::s(e.tactic.map(|t| t.label()).unwrap_or("")),
+                _ => SortVal::N(e.severity as i64),
+            },
+        ));
+        let f_rows: Rc<Vec<usize>> = Rc::new(refine(
             r.findings
                 .iter()
                 .enumerate()
                 .filter(|(_, f)| f.severity >= min && tac.map(|x| f.tactic == Some(x)).unwrap_or(true))
                 .map(|(i, _)| i)
                 .collect(),
-        );
+            &r.findings,
+            &query,
+            self.sort_of(ListId::Finding),
+            |f| format!("{} {} {} {} {} {}", f.category.label(), f.object, f.title, f.detail, f.target, f.technique),
+            |f, c| match c {
+                0 => SortVal::t(f.time),
+                1 => SortVal::s(f.category.label()),
+                2 => SortVal::s(&f.object),
+                3 => SortVal::s(&f.title),
+                4 => SortVal::N(f.severity as i64),
+                _ => SortVal::s(&f.target),
+            },
+        ));
         let show_f = self.tl_show_findings;
         let toolbar = div()
             .flex()
@@ -215,16 +240,13 @@ impl AppView {
             });
 
         let list = if show_f {
-            self.virtual_table(&t, "tl-findings", FINDING_COLS, f_rows, "没有符合条件的发现", cx, |this, i, ix, t, cx| {
+            self.virtual_table(&t, ListId::Finding, FINDING_COLS, f_rows, "没有符合条件的发现", cx, |this, i, ix, t, _cx| {
                 let f = &this.report.findings[i];
-                table_row(t, ("tlf", ix), FINDING_COLS, finding_cells(t, f)).on_click(cx.listener(move |this, _, _, cx| {
-                    let d = finding_detail(&this.report.findings[i]);
-                    this.show(d, cx);
-                }))
+                table_row(t, ("tlf", ix), FINDING_COLS, finding_cells(t, f))
             })
             .into_any_element()
         } else {
-            self.virtual_table(&t, "tl-events", TL_COLS, tl_rows, "在回溯周期内没有符合条件的事件", cx, |this, i, ix, t, cx| {
+            self.virtual_table(&t, ListId::Timeline, TL_COLS, tl_rows, "在回溯周期内没有符合条件的事件", cx, |this, i, ix, t, _cx| {
                 let e = &this.report.timeline[i];
                 let (fg, _) = t.severity(e.severity);
                 table_row(
@@ -247,21 +269,25 @@ impl AppView {
                         sev_badge(t, e.severity).into_any_element(),
                     ],
                 )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let d = timeline_detail(&this.report.timeline[i]);
-                    this.show(d, cx);
-                }))
             })
             .into_any_element()
         };
 
+        let search = self.search_box(Page::Timeline, cx);
         div()
             .size_full()
             .p(px(20.))
             .flex()
             .flex_col()
             .gap(px(14.))
-            .child(page_title(&t, "入侵还原", &format!("汇聚日志、持久化、文件与进程痕迹，按 ATT&CK 战术阶段还原近 {} 天的入侵过程", r.lookback_days.max(self.lookback))))
+            .child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap_4()
+                    .child(div().flex_1().min_w_0().child(page_title(&t, "入侵还原", &format!("汇聚日志、持久化、文件与进程痕迹，按 ATT&CK 战术阶段还原近 {} 天的入侵过程", r.lookback_days.max(self.lookback)))))
+                    .child(search),
+            )
             .when(!r.log_gaps.is_empty(), |d| d.child(notice(&t, "审计/日志配置不完整，以下来源的事件可能缺失，时间线结论仅供参考", &r.log_gaps)))
             .child(div().flex().items_center().gap(px(4.)).children(chain))
             .child(summary_card)

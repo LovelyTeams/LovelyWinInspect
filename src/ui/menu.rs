@@ -22,6 +22,20 @@ pub enum MenuAct {
     ClearHidden(String),
     /// report.persistence 中的下标 + 名称（执行前校验，避免重新排查后错位）
     DisableStartup(usize, String),
+    StopService(String),
+    EnableService(String),
+    EnableTask(String),
+    /// report.persistence 中的下标 + 任务名
+    DeleteTask(usize, String),
+    BlockIp(String),
+    UnblockIp(String),
+    Quarantine(String),
+    /// 隔离记录 ID + 原路径
+    RestoreQuarantine(String, String),
+    /// 在文件管理页中打开所在目录并选中
+    BrowseTo(String),
+    FsOpenDir(String),
+    FsSearchHere(String),
 }
 
 impl MenuAct {
@@ -49,12 +63,52 @@ impl MenuAct {
                     ),
                 )
             }),
+            MenuAct::StopService(name) => Some((
+                format!("停止服务 {name}？"),
+                "将立即停止该服务（不修改启动类型，重启后仍会按原配置启动）。\n若为业务或系统关键服务，停止后相关功能会中断。".into(),
+            )),
+            MenuAct::DeleteTask(i, name) => this.report.persistence.get(*i).filter(|it| &it.name == name).map(|it| {
+                (
+                    format!("删除计划任务 {}？", it.name),
+                    format!(
+                        "命令：{}\n\n删除前会自动把任务 XML 备份到 %APPDATA%\\LovelyWinInspect\\backup\\tasks，\n可用 schtasks /create /xml 恢复。备份失败时不会删除。",
+                        if it.command.is_empty() { "-" } else { &it.command }
+                    ),
+                )
+            }),
+            MenuAct::BlockIp(ip) => Some((
+                format!("封禁 IP {ip}？"),
+                format!(
+                    "将在 Windows 防火墙中添加入站与出站阻止规则（规则名 LovelyWinInspect-Block-{ip}）。\n{}可随时在右键菜单中解除封禁。",
+                    if crate::collect::util::is_private_ip_str(ip) { "注意：这是内网地址，封禁可能影响正常业务通信。\n" } else { "" }
+                ),
+            )),
+            MenuAct::Quarantine(path) => Some((
+                "隔离该文件？".into(),
+                format!(
+                    "{path}\n\n文件将被编码后移入隔离区（%ProgramData%\\LovelyWinInspect\\Quarantine）并从原位置删除，\n记录原路径与 SHA256，之后可在“文件管理 → 隔离区”中还原。\n若文件正被进程使用会隔离失败，需先结束相关进程。"
+                ),
+            )),
+            MenuAct::RestoreQuarantine(_, original) => Some((
+                "还原隔离文件？".into(),
+                format!("将把文件还原到原位置：\n{original}\n\n还原后的文件可能再次被执行，请确认它不是恶意文件。"),
+            )),
             _ => None,
         }
     }
 
-    fn is_danger(&self) -> bool {
-        matches!(self, MenuAct::KillProcess(..) | MenuAct::DisableStartup(..) | MenuAct::ClearHidden(_))
+    pub fn is_danger(&self) -> bool {
+        matches!(
+            self,
+            MenuAct::KillProcess(..)
+                | MenuAct::DisableStartup(..)
+                | MenuAct::ClearHidden(_)
+                | MenuAct::StopService(_)
+                | MenuAct::DeleteTask(..)
+                | MenuAct::BlockIp(_)
+                | MenuAct::Quarantine(_)
+                | MenuAct::RestoreQuarantine(..)
+        )
     }
 }
 
@@ -95,7 +149,7 @@ impl AppView {
         }
     }
 
-    fn toast(&mut self, msg: impl Into<String>, ok: bool, cx: &mut Context<Self>) {
+    pub fn toast(&mut self, msg: impl Into<String>, ok: bool, cx: &mut Context<Self>) {
         self.toast = Some((msg.into(), ok));
         // 几秒后自动消失
         cx.spawn(async move |this, cx| {
@@ -141,6 +195,57 @@ impl AppView {
                 Some(it) if &it.name == name => actions::disable_startup(it),
                 _ => Err("该启动项已变化（可能已重新排查），请重新选择".into()),
             },
+            MenuAct::StopService(name) => actions::stop_service(name),
+            MenuAct::EnableService(name) => actions::enable_service(name),
+            MenuAct::EnableTask(name) => actions::enable_task(name),
+            MenuAct::DeleteTask(i, name) => match self.report.persistence.get(*i) {
+                Some(it) if &it.name == name => actions::delete_task(it),
+                _ => Err("该计划任务已变化（可能已重新排查），请重新选择".into()),
+            },
+            MenuAct::BlockIp(ip) => {
+                let r = actions::block_ip(ip);
+                self.blocked_ips = actions::blocked_ips();
+                self.refresh_open_detail();
+                r
+            }
+            MenuAct::UnblockIp(ip) => {
+                let r = actions::unblock_ip(ip);
+                self.blocked_ips = actions::blocked_ips();
+                self.refresh_open_detail();
+                r
+            }
+            MenuAct::Quarantine(path) => {
+                let r = actions::quarantine_file(path);
+                if r.is_ok() {
+                    self.detail = None;
+                    self.selected = None;
+                    self.fs_refresh(cx);
+                }
+                r
+            }
+            MenuAct::RestoreQuarantine(id, _) => {
+                let r = actions::restore_quarantine(id);
+                if r.is_ok() {
+                    self.detail = None;
+                    self.selected = None;
+                    self.fs_refresh(cx);
+                }
+                r
+            }
+            MenuAct::BrowseTo(path) => {
+                self.browse_to_file(path, cx);
+                return;
+            }
+            MenuAct::FsOpenDir(path) => {
+                self.fs_navigate(Some(std::path::PathBuf::from(path)), true, cx);
+                return;
+            }
+            MenuAct::FsSearchHere(path) => {
+                self.fs_navigate(Some(std::path::PathBuf::from(path)), true, cx);
+                self.fs.search_open = true;
+                cx.notify();
+                return;
+            }
         };
         match res {
             Ok(msg) => self.toast(msg, true, cx),
@@ -148,7 +253,7 @@ impl AppView {
         }
     }
 
-    fn on_menu_click(&mut self, act: MenuAct, cx: &mut Context<Self>) {
+    pub fn on_menu_click(&mut self, act: MenuAct, cx: &mut Context<Self>) {
         self.menu = None;
         match act.confirm_text(self) {
             Some((title, body)) => {
@@ -348,18 +453,23 @@ impl AppView {
 
 // ---------------------------------------------------------------- 各面板菜单
 
-use crate::model::{ConnInfo, FileArtifact, PersistItem, ProcessInfo, RegItem};
+use std::collections::HashSet;
 
-fn copy_item(icon: &'static str, what: &'static str, text: &str) -> Option<MenuItem> {
+use crate::model::{ConnInfo, DnsCacheEntry, EventRecord, FileArtifact, NeighborEntry, PersistItem, PersistKind, ProcessInfo, RegItem};
+
+pub fn copy_item(icon: &'static str, what: &'static str, text: &str) -> Option<MenuItem> {
     (!text.trim().is_empty()).then(|| mi(icon, format!("复制{what}"), MenuAct::Copy(what, text.to_string())))
 }
 
-fn file_items(path: &str) -> Vec<MenuItem> {
+pub fn file_items(path: &str) -> Vec<MenuItem> {
     let mut v = Vec::new();
     if path.trim().is_empty() {
         return v;
     }
     v.push(mi("folder-open", "打开文件所在位置", MenuAct::OpenFolder(path.into())));
+    if std::path::Path::new(path).exists() {
+        v.push(mi("hard-drive", "在文件管理中查看", MenuAct::BrowseTo(path.into())));
+    }
     if let Some(c) = copy_item("copy", "路径", path) {
         v.push(c);
     }
@@ -380,7 +490,17 @@ pub fn process_menu(p: &ProcessInfo) -> Vec<MenuItem> {
     v
 }
 
-pub fn conn_menu(c: &ConnInfo) -> Vec<MenuItem> {
+/// 封禁 / 解除封禁某个 IP 的菜单项。
+fn block_item(ip: &str, blocked: &HashSet<String>) -> Option<MenuItem> {
+    let addr = crate::actions::blockable_ip(ip)?.to_string();
+    Some(if blocked.contains(&addr) {
+        mi("rotate-ccw", format!("解除封禁 {addr}"), MenuAct::UnblockIp(addr))
+    } else {
+        mi("ban", format!("防火墙封禁 {addr}"), MenuAct::BlockIp(addr))
+    })
+}
+
+pub fn conn_menu(c: &ConnInfo, blocked: &HashSet<String>) -> Vec<MenuItem> {
     let mut v = Vec::new();
     if !c.remote_addr.is_empty() {
         v.push(mi("globe", "复制远程地址", MenuAct::Copy("远程地址", format!("{}:{}", c.remote_addr, c.remote_port))));
@@ -391,6 +511,40 @@ pub fn conn_menu(c: &ConnInfo) -> Vec<MenuItem> {
     v.extend(file_items(&c.path));
     if c.pid > 4 && !c.process.is_empty() {
         v.push(mi("x-circle", format!("结束进程 {} (PID {})", c.process, c.pid), MenuAct::KillProcess(c.pid, c.process.clone())));
+    }
+    if c.external {
+        v.extend(block_item(&c.remote_addr, blocked));
+    }
+    v
+}
+
+pub fn dns_menu(d: &DnsCacheEntry, blocked: &HashSet<String>) -> Vec<MenuItem> {
+    let mut v = Vec::new();
+    v.extend(copy_item("copy", "域名", &d.name));
+    v.extend(copy_item("copy", "解析结果", &d.data));
+    if !crate::collect::util::is_private_ip_str(&d.data) {
+        v.extend(block_item(&d.data, blocked));
+    }
+    v
+}
+
+pub fn neighbor_menu(n: &NeighborEntry) -> Vec<MenuItem> {
+    let mut v = Vec::new();
+    v.extend(copy_item("copy", "IP 地址", &n.ip));
+    v.extend(copy_item("copy", "MAC 地址", &n.mac));
+    v
+}
+
+pub fn event_menu(e: &EventRecord, blocked: &HashSet<String>) -> Vec<MenuItem> {
+    let mut v = Vec::new();
+    v.extend(copy_item("copy", "事件详情", &e.detail));
+    v.extend(copy_item("user", "用户", &e.user));
+    if !e.source_ip.is_empty() && e.source_ip != "-" {
+        v.extend(copy_item("globe", "来源 IP", &e.source_ip));
+        v.extend(block_item(&e.source_ip, blocked));
+    }
+    if std::path::Path::new(&e.process).is_file() {
+        v.extend(file_items(&e.process));
     }
     v
 }
@@ -407,6 +561,23 @@ pub fn persist_menu(index: usize, it: &PersistItem) -> Vec<MenuItem> {
     if crate::actions::can_disable(it.kind) && it.enabled {
         v.push(mi("eye-off", "禁用该启动项", MenuAct::DisableStartup(index, it.name.clone())));
     }
+    match it.kind {
+        PersistKind::Service => {
+            if it.extra.contains("运行中") {
+                v.push(mi("circle-stop", "停止服务", MenuAct::StopService(it.name.clone())));
+            }
+            if !it.enabled {
+                v.push(mi("power", "启用服务（设为手动启动）", MenuAct::EnableService(it.name.clone())));
+            }
+        }
+        PersistKind::ScheduledTask => {
+            if !it.enabled {
+                v.push(mi("power", "启用计划任务", MenuAct::EnableTask(it.name.clone())));
+            }
+            v.push(mi("trash", "删除计划任务（自动备份 XML）", MenuAct::DeleteTask(index, it.name.clone())));
+        }
+        _ => {}
+    }
     v
 }
 
@@ -414,6 +585,7 @@ pub fn file_menu(f: &FileArtifact) -> Vec<MenuItem> {
     let mut v = file_items(&f.path);
     if std::path::Path::new(&f.path).is_file() {
         v.push(mi("eye-off", "恢复隐藏/系统属性", MenuAct::ClearHidden(f.path.clone())));
+        v.push(mi("archive", "隔离文件", MenuAct::Quarantine(f.path.clone())));
     }
     if let Some(c) = copy_item("copy", "SHA256", &f.sha256) {
         v.push(c);

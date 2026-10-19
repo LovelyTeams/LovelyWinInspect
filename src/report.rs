@@ -254,6 +254,12 @@ fn csv_tables(r: &ScanReport) -> Vec<(&'static str, Vec<u8>)> {
         &["类型", "文件名", "路径", "大小", "创建时间", "修改时间", "签名", "SHA256", "说明", "下载来源", "备用数据流", "风险", "原因"],
         r.files.iter().map(|f| vec![f.kind.label().into(), f.name.clone(), f.path.clone(), f.size.to_string(), fmt(f.created), fmt(f.modified), f.sign.label().into(), f.sha256.clone(), f.note.clone(), f.origin.clone(), f.streams.join("; "), f.risk.label().into(), f.reasons.join("；")]).collect(),
     )));
+    if !r.marks.is_empty() {
+        v.push(("marks.csv", table(
+            &["模块", "对象", "标签", "备注", "标记时间", "记录标识"],
+            r.marks.iter().map(|m| vec![m.category.clone(), m.object.clone(), m.tag.map(|t| t.label()).unwrap_or("").into(), m.note.clone(), fmt(Some(m.time)), m.key.clone()]).collect(),
+        )));
+    }
     v
 }
 
@@ -341,6 +347,20 @@ pub fn html(r: &ScanReport) -> String {
     body.push_str(&table_html(&["时间", "类型", "风险", "对象", "描述", "路径/目标", "战术", "处置建议"], r.findings.iter().map(|f| vec![
         fmt(f.time), f.category.label().into(), sev_tag(f.severity), esc(&f.object), esc(&f.title), esc(&f.target), f.tactic.map(|t| t.label()).unwrap_or("-").into(), esc(&f.advice),
     ])));
+
+    if !r.marks.is_empty() {
+        body.push_str("<h2>分析人员研判标记</h2>");
+        body.push_str(&table_html(&["模块", "对象", "标签", "备注", "标记时间"], r.marks.iter().map(|m| {
+            let tag = match m.tag {
+                Some(t) => {
+                    let cls = match t { MarkTag::Malicious => "crit", MarkTag::Suspicious => "med", MarkTag::FalsePositive => "info", MarkTag::Handled => "pass" };
+                    format!("<span class=\"tag {cls}\">{}</span>", t.label())
+                }
+                None => "-".into(),
+            };
+            vec![esc(&m.category), esc(&m.object), tag, esc(&m.note), fmt(Some(m.time))]
+        })));
+    }
 
     body.push_str("<h2>入侵时间线</h2>");
     body.push_str(&table_html(&["时间", "来源", "风险", "战术", "事件", "详情"], r.timeline.iter().filter(|e| e.severity >= Severity::Low).take(1500).map(|e| vec![

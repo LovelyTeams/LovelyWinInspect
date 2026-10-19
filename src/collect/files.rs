@@ -43,7 +43,7 @@ fn artifact(kind: ArtifactKind, p: &Path) -> FileArtifact {
 const BENIGN_STREAMS: &[&str] = &["SmartScreen", "com.dropbox.attributes", "com.dropbox.attrs", "AFP_AfpInfo", "AFP_Resource", "encryptable", "ms-properties", "OECustomProperty"];
 
 /// 文件的备用数据流（不含主数据流）：(名称, 大小)。
-fn alt_streams(p: &Path) -> Vec<(String, i64)> {
+pub(crate) fn alt_streams(p: &Path) -> Vec<(String, i64)> {
     use windows::Win32::Storage::FileSystem::{FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard, WIN32_FIND_STREAM_DATA};
     let w = wide(&p.display().to_string());
     let mut data = WIN32_FIND_STREAM_DATA::default();
