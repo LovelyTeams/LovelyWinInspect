@@ -114,7 +114,9 @@ pub fn fetch_latest(repo: &str, include_prerelease: bool) -> Result<ReleaseInfo,
         name: s("name"),
         notes: s("body"),
         url: s("html_url"),
-        published: s("published_at").replace('T', " ").trim_end_matches('Z').to_string(),
+        published: chrono::DateTime::parse_from_rfc3339(&s("published_at"))
+            .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|_| s("published_at")),
         prerelease: release.get("prerelease").and_then(|p| p.as_bool()).unwrap_or(false),
         assets,
     };
