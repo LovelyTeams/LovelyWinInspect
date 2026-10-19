@@ -1,0 +1,114 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      upx:
+        description: "使用 UPX 压缩（部分杀软对压壳程序误报率较高）"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # UPX 版本与官方发布包校验值，升级时一并更新
+  UPX_VERSION: "5.2.1"
+  UPX_SHA256: "eabc6792a347d45e945be7748423e7868fd01b0d2bcaa2f4b1031fd71ff69bda"
+
+jobs:
+  build:
+    name: Build (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $exe = ".\target\release\LovelyWinInspect.exe"
+          if (-not (Test-Path $exe)) { throw "未生成可执行文件" }
+          # Release 为 GUI 子系统程序，需用 Start-Process -Wait 等待其退出
+          $json = "$env:RUNNER_TEMP\smoke.json"
+          $p = Start-Process $exe -ArgumentList "--json", $json, "--days", "1" -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) { throw "无界面采集失败，退出码 $($p.ExitCode)" }
+          $size = (Get-Item $json).Length
+          if ($size -lt 1024) { throw "采集结果异常（$size 字节）" }
+          "采集结果 $([math]::Round($size/1KB)) KB"
+
+      - name: Compress with UPX
+        if: github.event_name != 'workflow_dispatch' || inputs.upx
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = "$env:RUNNER_TEMP\upx.zip"
+          Invoke-WebRequest -Uri "https://github.com/upx/upx/releases/download/v$env:UPX_VERSION/upx-$env:UPX_VERSION-win64.zip" -OutFile $zip
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:UPX_SHA256) { throw "UPX 校验失败：期望 $env:UPX_SHA256，实际 $actual" }
+          Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\upx" -Force
+          $upx = Get-ChildItem "$env:RUNNER_TEMP\upx" -Recurse -Filter upx.exe | Select-Object -First 1
+          $exe = ".\target\release\LovelyWinInspect.exe"
+          $before = (Get-Item $exe).Length
+          & $upx.FullName --best --lzma $exe
+          if ($LASTEXITCODE -ne 0) { throw "UPX 压缩失败" }
+          $after = (Get-Item $exe).Length
+          "压缩前 $([math]::Round($before/1MB,1)) MB → 压缩后 $([math]::Round($after/1MB,1)) MB"
+          # 压缩后仍需能正常运行
+          $v = Start-Process $exe -ArgumentList "--version" -Wait -PassThru -NoNewWindow
+          if ($v.ExitCode -ne 0) { throw "压缩后的程序无法运行，退出码 $($v.ExitCode)" }
+
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $exe = ".\target\release\LovelyWinInspect.exe"
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  LovelyWinInspect.exe" | Out-File -Encoding ascii ".\target\release\LovelyWinInspect.exe.sha256"
+          "SHA256 $hash"
+          "大小 $([math]::Round((Get-Item $exe).Length/1MB,1)) MB"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LovelyWinInspect
+          path: |
+            target/release/LovelyWinInspect.exe
+            target/release/LovelyWinInspect.exe.sha256
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$env:GITHUB_REF_NAME" `
+            ".\target\release\LovelyWinInspect.exe" `
+            ".\target\release\LovelyWinInspect.exe.sha256" `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --title "LovelyWinInspect $env:GITHUB_REF_NAME" `
+            --generate-notes
