@@ -1,0 +1,4 @@
+/target
+*.json.out
+scan_debug.json
+LovelyWinInspect_Reports/

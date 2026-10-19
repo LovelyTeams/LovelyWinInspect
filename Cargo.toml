@@ -1,0 +1,71 @@
+[package]
+name = "lovely-win-inspect"
+version = "0.1.0"
+edition = "2024"
+description = "LovelyWinInspect - Windows 基线核查与入侵应急响应还原工具 (GPUI)"
+license = "AGPL-3.0-only"
+repository = "https://github.com/lovelyteams/LovelyWinInspect"
+homepage = "https://github.com/lovelyteams/LovelyWinInspect"
+readme = "README.md"
+keywords = ["windows", "incident-response", "baseline", "forensics", "gpui"]
+categories = ["command-line-utilities", "gui"]
+
+[[bin]]
+name = "LovelyWinInspect"
+path = "src/main.rs"
+
+[build-dependencies]
+embed-resource = "3"
+
+[dependencies]
+gpui = "0.2.2"
+anyhow = "1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+winreg = "0.56"
+roxmltree = "0.20"
+sha2 = "0.10"
+
+[dependencies.windows]
+version = "0.61"
+features = [
+    "Wdk_System_Threading",
+    "Win32_Foundation",
+    "Win32_NetworkManagement_Dns",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_NetworkManagement_NetManagement",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Security_WinTrust",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_EventLog",
+    "Win32_System_ProcessStatus",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Services",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
