@@ -317,8 +317,6 @@ tools/                 # 辅助脚本
 
 本项目采用 **[GNU Affero General Public License v3.0](LICENSE)**（AGPL-3.0）。
 
-简单来说：你可以自由使用、修改和分发本项目，但分发修改后的版本，或把修改后的版本作为网络服务提供给他人使用时，必须以相同许可证公开完整源代码。
-
 <div align="center">
 
 Made with 💙 for Lovelyteams
