@@ -1,6 +1,6 @@
 [package]
 name = "lovely-win-inspect"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "LovelyWinInspect - Windows 基线核查与入侵应急响应还原工具 (GPUI)"
 license = "AGPL-3.0-only"
