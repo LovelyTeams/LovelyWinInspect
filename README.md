@@ -14,7 +14,7 @@
 ![UI](https://img.shields.io/badge/UI-GPUI-8A2BE2)
 ![Offline](https://img.shields.io/badge/离线运行-无需安装-success)
 
-[功能](#-功能一览) · [快速开始](#-快速开始) · [检测范围](#-检测范围) · [构建](#-从源码构建) · [常见问题](#-常见问题) · [许可证](#-许可证)
+[功能](#-功能一览) · [快速开始](#-快速开始) · [检测范围](#-检测范围) · [构建](#-从源码构建) · [更新日志](CHANGELOG.md) · [常见问题](#-常见问题) · [许可证](#-许可证)
 
 </div>
 
@@ -218,6 +218,14 @@ cargo build --release
 ```
 
 产物位于 `target/release/LovelyWinInspect.exe`。
+
+**发布新版本**
+
+1. 修改 `Cargo.toml` 中的 `version`
+2. 在 [CHANGELOG.md](CHANGELOG.md) 顶部添加该版本的更新日志：`## [x.y.z] - 日期`
+3. 提交并推送后打标签：`git tag vx.y.z`，再执行 `git push origin vx.y.z`
+
+CI 会先检查标签与 `Cargo.toml` 版本一致、更新日志不为空，任何一项不满足就不会发布；构建通过后用该版本的更新日志加上下载说明与 SHA256 生成 Release 说明。本地预览发布说明：`./tools/release_notes.ps1 -Tag vx.y.z -Exe target/release/LovelyWinInspect.exe`。
 
 **更换图标**
 

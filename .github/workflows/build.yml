@@ -28,6 +28,15 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          # 生成发布说明时需要上一个标签来给出对比链接
+          fetch-depth: 0
+
+      # 打标签发布前先检查版本号与更新日志，缺失时在构建前就失败
+      - name: Check version & changelog
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: ./tools/release_notes.ps1 -Tag "$env:GITHUB_REF_NAME" -CheckOnly
 
       - name: Show toolchain
         run: |
@@ -109,9 +118,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # 发布说明 = CHANGELOG.md 中该版本的更新日志 + 下载说明与 SHA256（见 tools/release_notes.ps1）
+          $notes = "$env:RUNNER_TEMP\release_notes.md"
+          ./tools/release_notes.ps1 -Tag "$env:GITHUB_REF_NAME" -Exe ".\target\release\LovelyWinInspect.exe" -Out $notes
           gh release create "$env:GITHUB_REF_NAME" `
             ".\target\release\LovelyWinInspect.exe" `
             ".\target\release\LovelyWinInspect.exe.sha256" `
             --repo "$env:GITHUB_REPOSITORY" `
             --title "LovelyWinInspect $env:GITHUB_REF_NAME" `
-            --generate-notes
+            --notes-file $notes
