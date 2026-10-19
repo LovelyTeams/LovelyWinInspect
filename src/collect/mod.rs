@@ -15,6 +15,7 @@ mod persistence_ext;
 mod artifacts_ext;
 pub mod sessions;
 pub mod process;
+pub mod registry;
 pub mod signature;
 pub mod util;
 
@@ -26,6 +27,10 @@ pub fn run_stage(stage: Stage, report: &mut ScanReport) -> String {
         Stage::Host => {
             report.host = host::collect();
             format!("{} / {}", report.host.hostname, report.host.os_name)
+        }
+        Stage::Registry => {
+            report.registry = registry::collect(since);
+            format!("注册表痕迹 {} 条", report.registry.len())
         }
         Stage::Process => {
             report.processes = process::collect();

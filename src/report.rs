@@ -98,6 +98,13 @@ pub fn export(r: &ScanReport, opts: ExportOptions, root: Option<&Path>) -> Resul
                 warnings.push(format!("{name}: {e}"));
             }
         }
+        // 本工具执行过的处置动作记录
+        let actions = crate::actions::log_path();
+        if actions.is_file() {
+            if let Err(e) = std::fs::copy(&actions, ev.join("actions.log")) {
+                warnings.push(format!("actions.log: {e}"));
+            }
+        }
         // 非微软计划任务 XML
         let tasks_root = PathBuf::from(format!("{}\\System32\\Tasks", util::system_root()));
         let task_dir = ev.join("tasks");

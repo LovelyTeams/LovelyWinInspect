@@ -15,6 +15,7 @@ use super::components::*;
 use crate::collect;
 use crate::model::*;
 use crate::report::{self, ExportOptions};
+use super::menu::{Confirm, ContextMenu};
 use crate::settings::{Settings, ThemeMode};
 use crate::update::{self, ReleaseInfo};
 use crate::theme::{Theme, theme};
@@ -30,6 +31,7 @@ pub enum Page {
     Account,
     EventLog,
     File,
+    Registry,
     Export,
     Settings,
 }
@@ -44,6 +46,7 @@ pub const NAV: &[(Page, &str, &str, &str)] = &[
     (Page::Account, "users", "账户", "账户与登录"),
     (Page::EventLog, "list", "日志", "系统日志分析"),
     (Page::File, "folder", "文件", "文件痕迹排查"),
+    (Page::Registry, "database", "注册表", "注册表取证：执行痕迹、用户活动与网络历史"),
     (Page::Export, "download", "导出", "证据与报告导出"),
 ];
 
@@ -68,6 +71,7 @@ impl Page {
             "account" => Page::Account,
             "eventlog" => Page::EventLog,
             "file" => Page::File,
+            "registry" => Page::Registry,
             "export" => Page::Export,
             "settings" => Page::Settings,
             _ => return None,
@@ -188,6 +192,10 @@ pub struct AppView {
     pub f_event: EventFilter,
     pub f_file_kind: Option<ArtifactKind>,
     pub f_file_suspicious: bool,
+    pub f_reg_cat: Option<crate::model::RegCategory>,
+    pub menu: Option<ContextMenu>,
+    pub confirm: Option<Confirm>,
+    pub toast: Option<(String, bool)>,
     pub export: ExportState,
     pub settings: Settings,
     pub update: UpdateState,
@@ -261,6 +269,10 @@ impl AppView {
             f_event: EventFilter::All,
             f_file_kind: None,
             f_file_suspicious: false,
+            f_reg_cat: None,
+            menu: None,
+            confirm: None,
+            toast: None,
             export: ExportState { opts: settings.export, running: false, task: None, result: None, error: None },
             settings,
             update: UpdateState::default(),
@@ -881,10 +893,14 @@ impl Render for AppView {
             Page::Account => self.render_accounts(cx).into_any_element(),
             Page::EventLog => self.render_events(cx).into_any_element(),
             Page::File => self.render_files(cx).into_any_element(),
+            Page::Registry => self.render_registry(cx).into_any_element(),
             Page::Export => self.render_export(cx).into_any_element(),
             Page::Settings => self.render_settings(cx).into_any_element(),
         };
         let drawer = self.detail.clone().map(|d| self.render_drawer(d, cx).into_any_element());
+        let menu = self.render_menu(window, cx);
+        let confirm = self.render_confirm(cx);
+        let toast = self.render_toast(cx);
         div()
             .relative()
             .size_full()
@@ -903,5 +919,8 @@ impl Render for AppView {
                     .child(div().flex_1().min_w(px(0.)).h_full().child(page)),
             )
             .children(drawer)
+            .children(menu)
+            .children(confirm)
+            .children(toast)
     }
 }

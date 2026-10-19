@@ -476,6 +476,77 @@ pub struct FileArtifact {
     pub reasons: Vec<String>,
 }
 
+/// 注册表取证条目的分类。
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum RegCategory {
+    UserAssist,
+    ShimCache,
+    MuiCache,
+    RecentDocs,
+    TypedPaths,
+    SearchTerm,
+    FileDialog,
+    Network,
+    MappedDrive,
+    Office,
+    ToolUsage,
+    Timeline,
+}
+
+impl RegCategory {
+    pub const ALL: [RegCategory; 12] = [
+        RegCategory::UserAssist,
+        RegCategory::ShimCache,
+        RegCategory::MuiCache,
+        RegCategory::RecentDocs,
+        RegCategory::TypedPaths,
+        RegCategory::SearchTerm,
+        RegCategory::FileDialog,
+        RegCategory::Network,
+        RegCategory::MappedDrive,
+        RegCategory::Office,
+        RegCategory::ToolUsage,
+        RegCategory::Timeline,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RegCategory::UserAssist => "程序启动记录",
+            RegCategory::ShimCache => "ShimCache",
+            RegCategory::MuiCache => "MuiCache",
+            RegCategory::RecentDocs => "最近文档",
+            RegCategory::TypedPaths => "地址栏路径",
+            RegCategory::SearchTerm => "搜索关键词",
+            RegCategory::FileDialog => "文件对话框",
+            RegCategory::Network => "网络连接历史",
+            RegCategory::MappedDrive => "网络共享",
+            RegCategory::Office => "Office 安全",
+            RegCategory::ToolUsage => "工具使用痕迹",
+            RegCategory::Timeline => "敏感键变更",
+        }
+    }
+}
+
+/// 一条注册表取证记录。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RegItem {
+    pub category: RegCategory,
+    pub name: String,
+    pub value: String,
+    pub location: String,
+    pub user: String,
+    pub time: Option<Time>,
+    pub note: String,
+    pub risk: Severity,
+    pub reasons: Vec<String>,
+}
+
+impl Default for RegCategory {
+    fn default() -> Self {
+        RegCategory::Timeline
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TimelineEvent {
     pub time: Time,
@@ -489,6 +560,7 @@ pub struct TimelineEvent {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Stage {
     Host,
+    Registry,
     Process,
     Network,
     Persistence,
@@ -500,8 +572,9 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const ALL: [Stage; 9] = [
+    pub const ALL: [Stage; 10] = [
         Stage::Host,
+        Stage::Registry,
         Stage::Process,
         Stage::Network,
         Stage::Persistence,
@@ -515,6 +588,7 @@ impl Stage {
     pub fn label(self) -> &'static str {
         match self {
             Stage::Host => "主机信息",
+            Stage::Registry => "注册表痕迹",
             Stage::Process => "进程信息",
             Stage::Network => "网络连接",
             Stage::Persistence => "持久化项",
@@ -564,6 +638,8 @@ pub struct ScanReport {
     /// 审计/日志配置缺口：存在时事件类结论可能不完整
     pub log_gaps: Vec<String>,
     pub files: Vec<FileArtifact>,
+    #[serde(default)]
+    pub registry: Vec<RegItem>,
     /// None 表示无法读取（通常是权限不足）
     #[serde(default)]
     pub shadow_copies: Option<Vec<ShadowCopy>>,

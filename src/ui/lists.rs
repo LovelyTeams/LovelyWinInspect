@@ -241,6 +241,13 @@ impl AppView {
                 let d = proc_detail(&this.report.processes[i]);
                 this.show(d, cx);
             }))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                    let items = super::menu::process_menu(&this.report.processes[i]);
+                    this.open_menu(ev.position, items, cx);
+                }),
+            )
         });
         list_page(&t, "进程分析", "进程路径、签名、父子关系与命令行参数研判（点击行查看完整命令行）", toolbar, list)
     }
@@ -389,6 +396,13 @@ impl AppView {
                         let d = conn_detail(&this.report.connections[i]);
                         this.show(d, cx);
                     }))
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                            let items = super::menu::conn_menu(&this.report.connections[i]);
+                            this.open_menu(ev.position, items, cx);
+                        }),
+                    )
                 });
                 (list, "TCP/UDP 连接与监听端口，关联进程、DNS 缓存域名并标记公网外联")
             }
@@ -474,6 +488,13 @@ impl AppView {
                 let d = persist_detail(&this.report.persistence[i]);
                 this.show(d, cx);
             }))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                    let items = super::menu::persist_menu(i, &this.report.persistence[i]);
+                    this.open_menu(ev.position, items, cx);
+                }),
+            )
         });
         list_page(&t, "启动项排查", "注册表自启动、服务、计划任务、启动目录、映像劫持、WMI 订阅、受信任根证书等持久化位置", toolbar, list)
     }
@@ -595,6 +616,13 @@ impl AppView {
                 let d = file_detail(&this.report.files[i]);
                 this.show(d, cx);
             }))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                    let items = super::menu::file_menu(&this.report.files[i]);
+                    this.open_menu(ev.position, items, cx);
+                }),
+            )
         });
         list_page(&t, "文件排查", "临时/公共目录新增文件（含下载来源与备用数据流）、Web 目录变更、Prefetch 执行痕迹、最近访问、Hosts 与 PowerShell 历史", toolbar, list)
     }
@@ -791,5 +819,93 @@ impl AppView {
             .child(section("当前会话（终端服务 / SMB）", SS_COLS, ss_rows, "当前没有其他会话"))
             .child(section("登录来源统计（4624 / 4625 / 1149）", LS_COLS, ls_rows, "回溯周期内无登录记录或无权限读取安全日志"))
             .child(section("本地组成员", GM_COLS, gm_rows, "未读取到组成员")))
+    }
+}
+
+// ---------------------------------------------------------------- 注册表取证
+
+const REG_COLS: &[Col] = &[
+    col("分类", 120.),
+    col("名称", 260.),
+    flex_col("值 / 说明"),
+    col("用户", 70.),
+    col("时间", 150.),
+    col("风险", 60.),
+];
+
+fn reg_detail(r: &RegItem) -> Detail {
+    Detail::new(r.name.clone(), r.category.label(), Some(r.risk))
+        .field("研判依据", reasons_text(&r.reasons))
+        .field("值", r.value.clone())
+        .field("说明", r.note.clone())
+        .field("注册表位置", r.location.clone())
+        .field("所属用户 (RID)", r.user.clone())
+        .field("时间", fmt_time(r.time))
+}
+
+impl AppView {
+    pub fn render_registry(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let r = self.report.clone();
+        let cat = self.f_reg_cat;
+        let mut idx: Vec<usize> = (0..r.registry.len())
+            .filter(|&i| cat.map(|c| r.registry[i].category == c).unwrap_or(true))
+            .collect();
+        idx.sort_by(|&a, &b| {
+            let (x, y) = (&r.registry[a], &r.registry[b]);
+            y.risk.cmp(&x.risk).then(y.time.cmp(&x.time))
+        });
+        let toolbar = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(chip(&t, "rc-all", format!("全部 ({})", r.registry.len()), cat.is_none()).on_click(cx.listener(|this, _, _, cx| {
+                this.f_reg_cat = None;
+                cx.notify();
+            })))
+            .children(RegCategory::ALL.into_iter().enumerate().filter_map(|(i, c)| {
+                let n = r.registry.iter().filter(|x| x.category == c).count();
+                (n > 0).then(|| {
+                    chip(&t, ("rc", i), format!("{} {n}", c.label()), cat == Some(c)).on_click(cx.listener(move |this, _, _, cx| {
+                        this.f_reg_cat = Some(c);
+                        cx.notify();
+                    }))
+                })
+            }));
+        let list = self.virtual_table(&t, "reg-list", REG_COLS, Rc::new(idx), "未读取到注册表痕迹（部分位置需要管理员权限）", cx, |this, i, ix, t, cx| {
+            let it = &this.report.registry[i];
+            table_row(
+                t,
+                ("reg", ix),
+                REG_COLS,
+                vec![
+                    muted_cell(t, it.category.label()),
+                    div().w_full().truncate().font_weight(FontWeight::MEDIUM).child(one_line(&it.name)).into_any_element(),
+                    muted_cell(t, if it.value.is_empty() { it.note.clone() } else { it.value.clone() }),
+                    muted_cell(t, if it.user.is_empty() { "-".to_string() } else { it.user.clone() }),
+                    muted_cell(t, fmt_time(it.time)),
+                    sev_badge(t, it.risk).into_any_element(),
+                ],
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let d = reg_detail(&this.report.registry[i]);
+                this.show(d, cx);
+            }))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                    let items = super::menu::reg_menu(&this.report.registry[i]);
+                    this.open_menu(ev.position, items, cx);
+                }),
+            )
+        });
+        list_page(
+            &t,
+            "注册表取证",
+            "程序启动记录 (UserAssist)、ShimCache、最近文档、地址栏与搜索历史、网络连接历史、Office 信任文档等",
+            toolbar,
+            list,
+        )
     }
 }
