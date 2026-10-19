@@ -20,8 +20,8 @@ pub enum MenuAct {
     HashFile(String),
     KillProcess(u32, String),
     ClearHidden(String),
-    /// report.persistence 中的下标
-    DisableStartup(usize),
+    /// report.persistence 中的下标 + 名称（执行前校验，避免重新排查后错位）
+    DisableStartup(usize, String),
 }
 
 impl MenuAct {
@@ -39,7 +39,7 @@ impl MenuAct {
                 "恢复隐藏文件？".into(),
                 format!("将去掉该文件的隐藏/系统属性，使其在资源管理器中可见：\n{path}\n\n这会修改文件属性，请确认已记录原始状态。"),
             )),
-            MenuAct::DisableStartup(i) => this.report.persistence.get(*i).map(|it| {
+            MenuAct::DisableStartup(i, name) => this.report.persistence.get(*i).filter(|it| &it.name == name).map(|it| {
                 (
                     format!("禁用启动项 {}？", it.name),
                     format!(
@@ -54,7 +54,7 @@ impl MenuAct {
     }
 
     fn is_danger(&self) -> bool {
-        matches!(self, MenuAct::KillProcess(..) | MenuAct::DisableStartup(_) | MenuAct::ClearHidden(_))
+        matches!(self, MenuAct::KillProcess(..) | MenuAct::DisableStartup(..) | MenuAct::ClearHidden(_))
     }
 }
 
@@ -137,9 +137,9 @@ impl AppView {
             },
             MenuAct::KillProcess(pid, name) => actions::kill_process(*pid, name),
             MenuAct::ClearHidden(path) => actions::clear_hidden(path),
-            MenuAct::DisableStartup(i) => match self.report.persistence.get(*i) {
-                Some(it) => actions::disable_startup(it),
-                None => Err("启动项已失效，请重新排查".into()),
+            MenuAct::DisableStartup(i, name) => match self.report.persistence.get(*i) {
+                Some(it) if &it.name == name => actions::disable_startup(it),
+                _ => Err("该启动项已变化（可能已重新排查），请重新选择".into()),
             },
         };
         match res {
@@ -405,7 +405,7 @@ pub fn persist_menu(index: usize, it: &PersistItem) -> Vec<MenuItem> {
         v.push(c);
     }
     if crate::actions::can_disable(it.kind) && it.enabled {
-        v.push(mi("eye-off", "禁用该启动项", MenuAct::DisableStartup(index)));
+        v.push(mi("eye-off", "禁用该启动项", MenuAct::DisableStartup(index, it.name.clone())));
     }
     v
 }

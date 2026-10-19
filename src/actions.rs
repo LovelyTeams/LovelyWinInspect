@@ -221,18 +221,29 @@ fn run_tool(program: &str, args: &[&str]) -> Result<String, String> {
 /// 写入 StartupApproved：首字节 bit0 置 1 表示禁用，与任务管理器一致。
 fn disable_run_key(item: &crate::model::PersistItem) -> Result<String, String> {
     use winreg::RegKey;
-    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS};
     let loc = item.location.to_ascii_uppercase();
-    let is_hklm = loc.starts_with("HKLM");
     let sub = if loc.contains("WOW6432NODE") { "Run32" } else { "Run" };
-    let (root, base) = if is_hklm {
-        (HKEY_LOCAL_MACHINE, format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\{sub}"))
+    const USER_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved";
+    let (root, base) = if loc.starts_with("HKLM") {
+        (
+            HKEY_LOCAL_MACHINE,
+            format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\{sub}"),
+        )
+    } else if loc.starts_with("HKU") {
+        // 采集记录的是具体用户的 SID，必须写回同一个用户，不能用当前用户代替
+        let sid = item
+            .location
+            .split('\\')
+            .nth(1)
+            .filter(|s| s.starts_with("S-1-"))
+            .ok_or("无法从位置中解析用户 SID")?;
+        (HKEY_USERS, format!(r"{sid}\{USER_PATH}\{sub}"))
+    } else if loc.starts_with("HKCU") {
+        (HKEY_CURRENT_USER, format!(r"{USER_PATH}\{sub}"))
     } else {
-        (HKEY_CURRENT_USER, format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\{sub}"))
-    };
-    if !is_hklm && !item.location.to_ascii_uppercase().contains("HKU") && !item.location.to_ascii_uppercase().contains("HKCU") {
         return Err("无法判断该启动项所属配置单元".into());
-    }
+    };
     let hive = RegKey::predef(root);
     let (key, _) = hive.create_subkey(&base).map_err(|e| format!("无法打开 StartupApproved：{e}"))?;
     // 12 字节：首字节 0x03 = 已禁用，其后 8 字节为禁用时间（留零即可）
