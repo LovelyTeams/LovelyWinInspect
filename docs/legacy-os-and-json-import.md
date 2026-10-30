@@ -54,6 +54,8 @@ GPUI 这一层是根本限制：它的 Windows 后端基于 DirectComposition、
    rustflags = ["-C", "target-feature=+crt-static"]
    ```
 
+   **已修复（2026-10-30）**：仓库新增 `.cargo/config.toml` 开启 `+crt-static`。Release 构建的导入表已不再依赖 `VCRUNTIME140.dll`、`ucrtbase.dll` 或 `api-ms-win-crt-*`，与 README 的“无需安装任何运行时”一致。旧系统仍受下方 Win8+ 系统 DLL 与 GPUI 限制。
+
 2. **无界面模式写出的 JSON 没有填 `tool` 和 `stages` 字段**（见 `main.rs` 的 `headless`），导入时无法识别是哪个版本采集的。做导入功能前应先补上。
 
 ## 阶段一：导入 JSON 报告进行离线分析

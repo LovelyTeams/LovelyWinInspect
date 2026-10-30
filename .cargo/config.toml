@@ -1,0 +1,3 @@
+[target.x86_64-pc-windows-msvc]
+# 2026-10-30：静态链接 CRT，保证 README 所说“无需安装任何运行时”成立。
+rustflags = ["-C", "target-feature=+crt-static"]
