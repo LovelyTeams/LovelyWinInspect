@@ -112,6 +112,8 @@ const USAGE: &str = "LovelyWinInspect —— Windows 安全基线核查与应急
   --report           无界面采集，导出报告后在浏览器中打开 HTML 报告
                      （无法使用图形界面的机器可用；配合 --days 指定回溯天数）
   --json <文件>      无界面模式：完成采集后把结果写入 JSON 文件
+  --import <文件>    读取已有 JSON 报告并离线重新分析（不采集本机）；
+                     配合 --json 写出新报告，配合 --export 重新导出证据包
   --days <N>         日志与文件痕迹的回溯天数（默认 30）
   --export           无界面模式下同时导出完整证据包
   --evtx             配合 --export，额外导出原始 .evtx 日志
@@ -121,6 +123,65 @@ const USAGE: &str = "LovelyWinInspect —— Windows 安全基线核查与应急
   -h, --help         显示本帮助
 
 不带参数运行则打开图形界面。建议以管理员身份运行。";
+
+/// 读取另一台机器导出的 JSON 报告，在本机离线重新分析。
+/// 2026-10-30：分析窗口以报告自身的 finished/started 为基准（见 analysis::analyze），
+/// 不访问本机，因此不会误操作分析机。
+fn import_report(args: &[String]) -> bool {
+    let Some(pos) = args.iter().position(|a| a == "--import") else { return false };
+    let input = match args.get(pos + 1) {
+        Some(path) => path.clone(),
+        None => {
+            eprintln!("--import 需要一个 JSON 报告路径");
+            return true;
+        }
+    };
+    const MAX_REPORT_BYTES: u64 = 512 * 1024 * 1024;
+    if let Ok(meta) = std::fs::metadata(&input) {
+        if meta.len() > MAX_REPORT_BYTES {
+            eprintln!("报告超过 512 MiB，拒绝导入: {}", meta.len());
+            return true;
+        }
+    }
+    let text = match std::fs::read_to_string(&input) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("读取报告失败: {e}");
+            return true;
+        }
+    };
+    let mut report: model::ScanReport = match serde_json::from_str(&text) {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!("JSON 解析失败: {e}");
+            return true;
+        }
+    };
+    analysis::analyze(&mut report);
+    println!(
+        "已离线重新分析：{} · 主机 {} · 采集 {} · 线索 {} 条",
+        report.tool,
+        if report.host.hostname.is_empty() { "<未知>" } else { &report.host.hostname },
+        report.finished.map(|t| t.to_rfc3339()).unwrap_or_else(|| "<未知>".into()),
+        report.findings.len()
+    );
+    if let Some(out_pos) = args.iter().position(|a| a == "--json") {
+        let out = args.get(out_pos + 1).cloned().unwrap_or_else(|| "lovelywininspect.reanalyzed.json".into());
+        match serde_json::to_string_pretty(&report).map(|json| std::fs::write(&out, json)) {
+            Ok(Ok(())) => println!("已写入 {out}"),
+            Ok(Err(e)) => eprintln!("写入失败: {e}"),
+            Err(e) => eprintln!("序列化失败: {e}"),
+        }
+    }
+    if args.iter().any(|a| a == "--export") {
+        let opts = report::ExportOptions { evtx: false, ..Default::default() };
+        match report::export(&report, opts, None) {
+            Ok(result) => println!("证据包已导出到 {}（{} 个文件）", result.dir.display(), result.files.len()),
+            Err(e) => eprintln!("导出失败: {e}"),
+        }
+    }
+    true
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -163,6 +224,9 @@ fn main() {
     if args.iter().any(|a| a == "--report") {
         let ok = fallback::run_report(None, lookback);
         std::process::exit(if ok { 0 } else { 1 });
+    }
+    if import_report(&args) {
+        return;
     }
     if headless(&args) {
         return;

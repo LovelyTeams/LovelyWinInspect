@@ -154,7 +154,10 @@ fn assess_conn(c: &mut ConnInfo, proc_: Option<&ProcessInfo>) {
 // ---------------------------------------------------------------- 总入口
 
 pub fn analyze(r: &mut ScanReport) {
-    let since = crate::collect::util::days_ago(r.lookback_days);
+    // 2026-10-30：回溯窗口以采集完成/开始时间为基准，而不是分析时的当前时间。
+    // 离线重新分析旧报告时，用当前时间会把旧事件整体挤出窗口。
+    let anchor = r.finished.or(r.started).unwrap_or_else(chrono::Local::now);
+    let since = anchor - chrono::Duration::days(r.lookback_days as i64);
 
     // 进程 + 网络
     let mut conn_count: HashMap<u32, u32> = HashMap::new();
